@@ -1,0 +1,2 @@
+# EirvaBot
+My discord bot 
