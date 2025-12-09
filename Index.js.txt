@@ -1,0 +1,191 @@
+const { Client, GatewayIntentBits, PermissionsBitField } = require("discord.js");
+const fs = require("fs");
+const ms = require("ms");
+require("dotenv").config();
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildVoiceStates
+    ]
+});
+
+const prefix = "#";
+const LOG_CHANNEL_ID = "1438343173712908308";
+
+// الرولات
+const banKickRoles = ["Owner", "Co owner", "Founder", "Mod"];
+const staffRoles = ["Owner", "Co owner", "Founder", "Mod", "Admin", "Staff"];
+
+// أوامر
+const muteCMDs = ["اسكت", "اسكات", "سدحلقك", "اص"];
+const unmuteCMDs = ["تكلم"];
+const banCMDs = ["حظر", "توكل"];
+const unbanCMDs = ["فك", "العفو-الملكي"];
+const kickCMDs = ["طرد"];
+const warnCMDs = ["تحذير"];
+const warnShowCMDs = ["تحذيرات"];
+const warnRemoveCMDs = ["ازالة"];
+const nickCMDs = ["لقب"];
+const lockCMDs = ["قفل"];
+const unlockCMDs = ["فتح"];
+const clearCMDs = ["مسح"];
+const vmuteCMDs = ["صوتك-مزعج"];
+const vunmuteCMDs = ["ارجع"];
+
+// تحميل البيانات
+let data = { warnings: {}, mutes: {} };
+if (fs.existsSync("./data.json")) {
+    try { data = JSON.parse(fs.readFileSync("./data.json", "utf8")); } 
+    catch (e) { console.error("Failed to load data.json:", e); }
+} else {
+    fs.writeFileSync("./data.json", JSON.stringify(data, null, 2));
+}
+
+// --- Helpers ---
+function hasRoleFrom(member, roleNames) {
+    if (!member || !member.roles) return false;
+    return member.roles.cache.some(r => roleNames.includes(r.name));
+}
+
+async function sendLog(guild, content) {
+    try {
+        const ch = guild.channels.cache.get(LOG_CHANNEL_ID);
+        if (ch && ch.send) await ch.send({ content });
+    } catch (e) { console.error("Log send failed:", e); }
+}
+
+function saveData() {
+    fs.writeFileSync("./data.json", JSON.stringify(data, null, 2));
+}
+
+function getTarget(msg, args) {
+    if (msg.mentions.members.size > 0) return msg.mentions.members.first();
+    if (args[0]) {
+        const id = args[0].replace(/[<@!>]/g, "");
+        return msg.guild.members.cache.get(id) || null;
+    }
+    return null;
+}
+
+function getTimeArg(args) {
+    for (let t of args) {
+        if (ms(t)) return t;
+    }
+    return null;
+}
+
+// إعادة تشغيل الميوت بعد إعادة تشغيل البوت
+async function restoreMutes() {
+    for (const guildId in data.mutes) {
+        const guild = client.guilds.cache.get(guildId);
+        if (!guild) continue;
+
+        for (const userId in data.mutes[guildId]) {
+            const muteData = data.mutes[guildId][userId];
+            const member = await guild.members.fetch(userId).catch(()=>null);
+            const role = guild.roles.cache.find(r=>r.name==="Muted");
+            if (!member || !role) continue;
+
+            const remaining = muteData.endTime - Date.now();
+            if (remaining > 0) {
+                if (!member.roles.cache.has(role.id)) {
+                    await member.roles.add(role, "Restore mute after restart");
+                }
+                setTimeout(async () => {
+                    try { 
+                        const memberNow = await guild.members.fetch(userId).catch(()=>null);
+                        if (memberNow && memberNow.roles.cache.has(role.id)) {
+                            await memberNow.roles.remove(role, "Auto unmute"); 
+                        }
+                        delete data.mutes[guildId][userId]; 
+                        saveData(); 
+                    } catch (e){ console.error(e); }
+                }, remaining);
+            } else {
+                delete data.mutes[guildId][userId];
+                saveData();
+            }
+        }
+    }
+}
+
+client.on("ready", async () => {
+    console.log(`Logged in as ${client.user.tag}`);
+    restoreMutes();
+});
+
+client.on("messageCreate", async (msg) => {
+    try {
+        if (msg.author.bot || !msg.guild || !msg.content.startsWith(prefix)) return;
+
+        const content = msg.content.slice(prefix.length).trim();
+        const parts = content.split(/\s+/);
+        const cmd = parts[0].toLowerCase();
+        const args = parts.slice(1);
+
+        const target = getTarget(msg, args);
+
+        // ===== MUTE =====
+        if (muteCMDs.includes(cmd)) {
+            if (!hasRoleFrom(msg.member, staffRoles)) return msg.reply("ما لك الصلاحية لاستخدام هذا الأمر.");
+            if (!target) return msg.reply("رجاءً منشن العضو.");
+            const durationStr = getTimeArg(args);
+            if (!durationStr) return; // لازم تحدد المدة
+
+            const role = msg.guild.roles.cache.find(r => r.name === "Muted");
+            if (!role) return;
+
+            await target.roles.add(role, `Muted by ${msg.author.tag} for ${durationStr}`);
+            msg.reply(`تم إسكات ${target} لمدة ${durationStr}`);
+            await sendLog(msg.guild, `${msg.author.tag} أسكت ${target.user.tag} لمدة ${durationStr}`);
+
+            const endTime = Date.now() + ms(durationStr);
+            if (!data.mutes[msg.guild.id]) data.mutes[msg.guild.id] = {};
+            data.mutes[msg.guild.id][target.id] = { endTime };
+            saveData();
+
+            setTimeout(async () => {
+                try {
+                    const memberNow = await msg.guild.members.fetch(target.id).catch(()=>null);
+                    if (memberNow && memberNow.roles.cache.has(role.id)) {
+                        await memberNow.roles.remove(role, "Auto unmute"); 
+                    }
+                    delete data.mutes[msg.guild.id][target.id]; 
+                    saveData(); 
+                    // **لا ترسل أي رسالة عند انتهاء الميوت تلقائيًا**
+                } catch (e) { console.error(e); }
+            }, ms(durationStr));
+            return;
+        }
+
+        // ===== UNMUTE (عند أمر #تكلم) =====
+        if (unmuteCMDs.includes(cmd)) {
+            if (!hasRoleFrom(msg.member, staffRoles)) return msg.reply("ما لك الصلاحية لاستخدام هذا الأمر.");
+            if (!target) return msg.reply("رجاءً منشن العضو.");
+
+            const role = msg.guild.roles.cache.find(r => r.name === "Muted");
+            if (!role) return;
+
+            if (!target.roles.cache.has(role.id)) return msg.reply("العضو مو مكتوم أصلاً.");
+            await target.roles.remove(role, `Unmuted by ${msg.author.tag}`);
+            msg.reply(`تم فك الميوت عن ${target}`);
+            await sendLog(msg.guild, `${msg.author.tag} فك الميوت عن ${target.user.tag}`);
+            delete data.mutes[msg.guild.id]?.[target.id];
+            saveData();
+            return;
+        }
+
+        // ===== باقي الأوامر كما في الكود السابق =====
+        // (WARN، SHOW WARNINGS، REMOVE WARNING، NICKNAME، BAN، UNBAN، KICK، LOCK/UNLOCK، CLEAR، VOICE MUTE/UNMUTE)
+        // لا تغير شيء فيها، نفس الصلاحيات والوظائف المطلوبة
+
+    } catch (e) {
+        console.error("Message handler error:", e);
+    }
+});
+
+client.login(MTQ0MTIzNzAzNzc2MzEzNzUzOQ.GvbBaM.NkU3lWmjdrMhh7RlT1_1V4kKbz8XS4q3a-laYI);
